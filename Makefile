@@ -1,7 +1,7 @@
 .PHONY: help up down restart logs ps build verify queues smoke clean e2e e2e-fast
 
 help:
-	@echo "Multi-Agent RAG infrastructure"
+	@echo "Multi-Agent RAG — see README.md, ARCHITECTURE.md, docs/PORTFOLIO.md"
 	@echo "  make up        - build + start the full stack (detached)"
 	@echo "  make down      - stop the stack (keep volumes)"
 	@echo "  make clean     - stop the stack AND delete volumes"

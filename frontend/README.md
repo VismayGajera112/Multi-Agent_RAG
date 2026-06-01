@@ -4,6 +4,8 @@ A lightweight React + TypeScript + Vite + Tailwind frontend for the Multi-Agent
 RAG backend. Two-panel layout: multi-PDF upload (left) and streaming RAG chat
 (right).
 
+**Project docs:** [../README.md](../README.md) · [../ARCHITECTURE.md](../ARCHITECTURE.md) · [../docs/PORTFOLIO.md](../docs/PORTFOLIO.md)
+
 ## Features
 
 - **Multi-PDF upload** — drag-and-drop or file picker, multiple files at once
