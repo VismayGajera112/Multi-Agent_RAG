@@ -1,0 +1,306 @@
+name: multi-agent-rag
+
+# =============================================================================
+# Local production-grade infrastructure for the Multi-Agent RAG system.
+#
+#   Brokering / state : RabbitMQ (AMQP) + Redis
+#   Async compute     : Celery worker (+ Flower, celery-exporter)
+#   Vector store      : Qdrant
+#   Observability     : OpenTelemetry Collector -> Prometheus -> Grafana
+#
+# All services share the `ragnet` bridge network and resolve each other by
+# service name (rabbitmq, redis, qdrant, otel-collector, ...).
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # RabbitMQ — durable queues + DLX declared from definitions.json at boot.
+  #   5672  AMQP            15672 management UI            15692 prometheus
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rag_rabbitmq
+    restart: unless-stopped
+    hostname: rabbitmq
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+      - "${RABBITMQ_METRICS_PORT:-15692}:15692"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Redis — Celery result backend (db 0) + cache / ingestion-state (db 1).
+  # Append-only persistence enabled for durability across restarts.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: rag_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--loglevel", "warning"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Qdrant — vector storage.   6333 REST/UI   6334 gRPC
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: rag_qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # FastAPI app — exposes the REST API + /metrics, emits OTLP traces.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: multi-agent-rag:latest
+    container_name: rag_api
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      REDIS_CACHE_URL: redis://redis:6379/1
+      QDRANT_URL: http://qdrant:6333
+      UPLOAD_DIR: /data/uploads
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-models/text-embedding-004}
+      GEMINI_CHAT_MODEL: ${GEMINI_CHAT_MODEL:-gemini-1.5-flash}
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    volumes:
+      - upload_data:/data/uploads
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Celery worker — consumes pdf_ingestion_queue, JSON tasks, exp. backoff.
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: multi-agent-rag:latest
+    container_name: rag_worker
+    restart: unless-stopped
+    command:
+      - celery
+      - -A
+      - app.core.celery_app:celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
+      - --queues=celery,pdf_ingestion_queue,chat_analytics_queue
+      - -n
+      - worker1@%h
+    env_file:
+      - .env
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+      REDIS_CACHE_URL: redis://redis:6379/1
+      QDRANT_URL: http://qdrant:6333
+      UPLOAD_DIR: /data/uploads
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-models/text-embedding-004}
+      # Prometheus multiprocess mode so prefork children aggregate correctly.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom_multiproc
+      WORKER_METRICS_PORT: "9809"
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    volumes:
+      - upload_data:/data/uploads
+    tmpfs:
+      - /tmp/prom_multiproc
+    expose:
+      - "9809"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Frontend — React/Vite app served by nginx, which also reverse-proxies
+  # /api/* to the FastAPI backend (so the browser needs no CORS / direct port).
+  #   http://localhost:3000
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: multi-agent-rag-frontend:latest
+    container_name: rag_frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - api
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Flower — live Celery monitoring UI.   http://localhost:5555
+  # ---------------------------------------------------------------------------
+  flower:
+    image: mher/flower:2.0
+    container_name: rag_flower
+    restart: unless-stopped
+    command: ["celery", "--broker=amqp://guest:guest@rabbitmq:5672//", "flower", "--broker_api=http://guest:guest@rabbitmq:15672/api/"]
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # celery-exporter — turns Celery task events into Prometheus metrics (:9808).
+  # ---------------------------------------------------------------------------
+  celery-exporter:
+    image: danihodovic/celery-exporter:latest
+    container_name: rag_celery_exporter
+    restart: unless-stopped
+    environment:
+      # Task events are published over the broker (RabbitMQ).
+      CE_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    ports:
+      - "${CELERY_EXPORTER_PORT:-9808}:9808"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # OpenTelemetry Collector — OTLP in (4317/4318), prometheus exporter (8889),
+  # collector self-metrics (8888), health check (13133).
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: rag_otel_collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "8888:8888"
+      - "8889:8889"
+      - "13133:13133"
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — scrapes FastAPI, Celery, RabbitMQ, OTel collector.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: rag_prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - otel-collector
+    networks:
+      - ragnet
+
+  # ---------------------------------------------------------------------------
+  # Grafana — auto-provisioned Prometheus datasource + dashboards.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: rag_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      # Frontend owns host :3000, so Grafana is published on :3001 by default.
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - ragnet
+
+# -----------------------------------------------------------------------------
+networks:
+  ragnet:
+    name: ragnet
+    driver: bridge
+
+volumes:
+  rabbitmq_data:
+  redis_data:
+  qdrant_data:
+  prometheus_data:
+  grafana_data:
+  upload_data:

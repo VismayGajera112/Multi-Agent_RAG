@@ -1,0 +1,151 @@
+{
+  "rabbit_version": "3.13.0",
+  "users": [
+    {
+      "name": "guest",
+      "password": "guest",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    { "name": "/" }
+  ],
+  "permissions": [
+    {
+      "user": "guest",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "ha-and-dlx",
+      "pattern": "^(pdf_ingestion_queue|embedding_retry_queue)$",
+      "apply-to": "queues",
+      "priority": 0,
+      "definition": {
+        "dead-letter-exchange": "dead_letter_exchange"
+      }
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "pdf_ingestion_exchange",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "chat_analytics_exchange",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "embedding_retry_exchange",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "dead_letter_exchange",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "pdf_ingestion_queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "classic",
+        "x-dead-letter-exchange": "dead_letter_exchange",
+        "x-dead-letter-routing-key": "dead_letter"
+      }
+    },
+    {
+      "name": "embedding_retry_queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "classic",
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "pdf_ingestion_exchange",
+        "x-dead-letter-routing-key": "pdf_ingestion"
+      }
+    },
+    {
+      "name": "chat_analytics_queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "classic",
+        "x-dead-letter-exchange": "dead_letter_exchange",
+        "x-dead-letter-routing-key": "dead_letter"
+      }
+    },
+    {
+      "name": "dead_letter_queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "classic"
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "source": "pdf_ingestion_exchange",
+      "vhost": "/",
+      "destination": "pdf_ingestion_queue",
+      "destination_type": "queue",
+      "routing_key": "pdf_ingestion",
+      "arguments": {}
+    },
+    {
+      "source": "chat_analytics_exchange",
+      "vhost": "/",
+      "destination": "chat_analytics_queue",
+      "destination_type": "queue",
+      "routing_key": "chat_analytics",
+      "arguments": {}
+    },
+    {
+      "source": "embedding_retry_exchange",
+      "vhost": "/",
+      "destination": "embedding_retry_queue",
+      "destination_type": "queue",
+      "routing_key": "embedding_retry",
+      "arguments": {}
+    },
+    {
+      "source": "dead_letter_exchange",
+      "vhost": "/",
+      "destination": "dead_letter_queue",
+      "destination_type": "queue",
+      "routing_key": "dead_letter",
+      "arguments": {}
+    }
+  ]
+}

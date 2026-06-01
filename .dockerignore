@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.git/
+.gitignore
+*.md
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+grafana/
+prometheus/
+otel/
+rabbitmq/

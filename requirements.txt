@@ -1,0 +1,30 @@
+# ---- Web / API ----
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-multipart==0.0.20
+
+# ---- Task queue ----
+celery==5.4.0
+kombu==5.4.2
+amqp==5.3.1
+redis==5.2.1
+
+# ---- Vector store ----
+qdrant-client==1.18.0
+
+# ---- PDF parsing + embeddings ----
+pypdf==5.1.0
+google-generativeai==0.8.6
+
+# ---- Metrics ----
+prometheus-fastapi-instrumentator==7.1.0
+prometheus-client==0.21.1
+
+# ---- Tracing (OpenTelemetry) ----
+opentelemetry-sdk==1.42.1
+opentelemetry-exporter-otlp==1.42.1
+opentelemetry-instrumentation-fastapi==0.63b1
+opentelemetry-instrumentation-celery==0.63b1
+opentelemetry-instrumentation-logging==0.63b1
